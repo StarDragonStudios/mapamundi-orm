@@ -1,0 +1,19 @@
+{
+    "name": "sdstudios/mapamundi-orm",
+    "description": "A php ORM that defines the database using only clases.",
+    "type": "library",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "Sdstudios\\MapamundiOrm\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "Star Dragon Studios",
+            "email": "stardragonstudios@hotmail.com"
+        }
+    ],
+    "minimum-stability": "stable",
+    "require": {}
+}
