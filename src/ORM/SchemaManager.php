@@ -3,203 +3,188 @@
 namespace Sdstudios\MapamundiOrm\ORM;
 
 use Exception;
-use PDO;
-use ReflectionClass;
+use PDOException;
 use ReflectionException;
-use Sdstudios\MapamundiOrm\ORM\Column;
+use Sdstudios\MapamundiOrm\Database\DBCore;
+use ReflectionClass;
+use ReflectionProperty;
 
-readonly class SchemaManager
+/**
+ * Se encarga de crear y/o actualizar las tablas basándose en la información
+ * obtenida de los atributos Entity, Column, ForeignKey, etc.
+ */
+class SchemaManager
 {
-    public function __construct(private PDO $pdo) { }
-
     /**
-     * Sincroniza una tabla para la clase $modelClass.
-     * - Crea las columnas definidas con #[Column].
-     * - Crea las FKs definidas con #[ManyToOne] o #[OneToOne], si la FK está en ESTA tabla.
-     * - Crea tablas pivote para #[ManyToMany].
+     * Crea la tabla (si no existe) para una clase de entidad dada.
+     *
+     * @param string $entityClass Nombre FQCN de la clase (ej: App\Models\User)
+     *
+     * @return bool
      * @throws ReflectionException
+     * @throws Exception
      */
-    public function syncTable(string $modelClass): void
+    public static function createTableFromEntity(string $entityClass): bool
     {
-        /** @var Model $modelClass */
-        $tableName = $modelClass::tableName();
-        $refClass = new ReflectionClass($modelClass);
+        // 1. Obtener la meta-información de la clase
+        $reflection = new ReflectionClass($entityClass);
 
-        $columnsSql = [];
-        $constraints = [];  // para FOREIGN KEY, etc.
+        // Verificar si realmente está anotada con #[Entity]
+        $entityAttr = $reflection->getAttributes(Entity::class);
+        if (empty($entityAttr)) {
+            // No es una entidad, no hacemos nada
+            return false;
+        }
 
-        // 1. Recorrer propiedades para Column
-        foreach ($refClass->getProperties() as $prop) {
-            // (a) Columns
-            $colAttrs = $prop->getAttributes(Column::class);
-            if (count($colAttrs) > 0) {
-                $colMeta = $colAttrs[0]->newInstance();
-                $propName = $prop->getName();
-                $colDef = $this->buildColumnDefinition($propName, $colMeta);
-                $columnsSql[] = $colDef;
+        // Instanciamos la metadata del atributo Entity
+        /** @var Entity $entityMeta */
+        $entityMeta = $entityAttr[0]->newInstance();
+        // Si definió tableName, lo tomamos; si no, derivamos de la clase
+        $tableName = $entityMeta->tableName ?? self::deriveTableName($entityClass);
+
+        // 2. Recorrer las propiedades para buscar #[Column] y #[ForeignKey]
+        $columns = [];
+        $foreignKeys = [];
+
+        $properties = $reflection->getProperties(ReflectionProperty::IS_PUBLIC);
+        foreach ($properties as $prop) {
+            // Buscar la meta Column
+            $colAttr = $prop->getAttributes(Column::class);
+            if (!empty($colAttr)) {
+                /** @var Column $colMeta */
+                $colMeta = $colAttr[0]->newInstance();
+
+                // Respetar el nombre si se definió; si no, usar el nombre de la propiedad
+                $colName = $colMeta->name ?? $prop->getName();
+
+                $columns[] = [
+                    'name'          => $colName,
+                    'type'          => $colMeta->type,
+                    'length'        => $colMeta->length,
+                    'nullable'      => $colMeta->nullable,
+                    'primaryKey'    => $colMeta->primaryKey,
+                    'autoIncrement' => $colMeta->autoIncrement,
+                ];
             }
 
-            // (b) Relaciones: ManyToOne, OneToOne => Generan FKs en ESTA tabla (si la FK existe aquí)
-            $m2oAttrs = $prop->getAttributes(Many2One::class);
-            if (count($m2oAttrs) > 0) {
-                /** @var Many2One $rel */
-                $rel = $m2oAttrs[0]->newInstance();
-                // La FK se supone que está en ESTA tabla, en $rel->foreignKey
-                // Apunta a $rel->target::tableName() .($rel->ownerKey)
-                $this->addForeignKeyConstraint(
-                    $constraints,
-                    $tableName,
-                    $rel->foreignKey,
-                    $rel->target::tableName(),
-                    $rel->ownerKey,
-                    $rel->onDeleteCascade
-                );
-            }
+            // Buscar la meta ForeignKey (si la hubiese)
+            $fkAttr = $prop->getAttributes(ForeignKey::class);
+            if (!empty($fkAttr)) {
+                /** @var ForeignKey $fkMeta */
+                $fkMeta = $fkAttr[0]->newInstance();
 
-            $o2oAttrs = $prop->getAttributes(One2One::class);
-            if (count($o2oAttrs) > 0) {
-                /** @var One2One $rel */
-                $rel = $o2oAttrs[0]->newInstance();
-                // Igual que ManyToOne, si la FK está en la tabla actual
-                // (depende de la semántica, pero asumimos $rel->foreignKey está aquí)
-                $this->addForeignKeyConstraint(
-                    $constraints,
-                    $tableName,
-                    $rel->foreignKey,
-                    $rel->target::tableName(),
-                    $rel->localKey,
-                    $rel->onDeleteCascade
-                );
-            }
+                // El nombre de la columna local podría inferirse de Column o de la propiedad
+                $fkColName = null;
+                if (!empty($colAttr)) {
+                    // Reutiliza la info de la columna
+                    $fkColName = $columns[count($columns) - 1]['name'] ?? $prop->getName();
+                } else {
+                    // Si no hay #[Column], usa el nombre de la propiedad
+                    $fkColName = $prop->getName();
+                }
 
-            // (c) OneToMany => la FK está en la tabla hija, NO la creamos aquí
-            // (d) ManyToMany => creamos la tabla pivote
-            $m2mAttrs = $prop->getAttributes(Many2Many::class);
-            if (count($m2mAttrs) > 0) {
-                /** @var Many2Many $rel */
-                $rel = $m2mAttrs[0]->newInstance();
-                $this->createPivotTable($modelClass, $rel);
+                // Añadir a la lista de FKs
+                $foreignKeys[] = [
+                    'columnName'       => $fkColName,
+                    'referenceTable'   => $fkMeta->referenceTable,
+                    'referenceColumn'  => $fkMeta->referenceColumn
+                ];
             }
         }
 
-        // 2. Generar la sentencia CREATE TABLE para la tabla principal
-        //    Agregar constraints (FKs) al final
-        $createSql = "CREATE TABLE IF NOT EXISTS `$tableName` (\n  "
-            . implode(",\n  ", array_merge($columnsSql, $constraints))
-            . "\n) ENGINE=InnoDB;";
+        // 3. Generar la sentencia SQL: CREATE TABLE ...
+        $sql = self::buildCreateTableSQL($tableName, $columns, $foreignKeys);
 
-        // 3. Ejecutar
-        $this->pdo->exec($createSql);
+        // 4. Ejecutar en la base de datos
+        $conn = DBCore::getInstance()->getConnection();
+
+        // Podrías chequear si la tabla ya existe y tal vez "alterarla" en lugar de crearla.
+        // Para simplificar, aquí solo hacemos CREATE TABLE IF NOT EXISTS.
+        try {
+            $conn->exec($sql);
+            return true;
+        } catch (PDOException $e) {
+            // Maneja el error a tu manera
+            echo "Error creando tabla '$tableName': " . $e->getMessage();
+            return false;
+        }
     }
 
     /**
-     * Construye la parte SQL de la definición de una columna (p. ej. `id INT NOT NULL AUTO_INCREMENT PRIMARY KEY`).
+     * Construye la sentencia CREATE TABLE IF NOT EXISTS a partir de la información de columnas y fks.
      */
-    private function buildColumnDefinition(string $propName, Column $colMeta): string
-    {
-        $sqlType = match ($colMeta->type) {
-            'int'      => 'INT',
-            'varchar'  => "VARCHAR({$colMeta->length})",
-            'text'     => 'TEXT',
-            default    => strtoupper($colMeta->type),
-        };
-
-        $colDef = "`$propName` $sqlType";
-        $colDef .= $colMeta->nullable ? ' NULL' : ' NOT NULL';
-
-        if ($colMeta->default !== '') {
-            $colDef .= " DEFAULT '{$colMeta->default}'";
-        }
-        if ($colMeta->unique) {
-            $colDef .= ' UNIQUE';
-        }
-        if ($colMeta->primaryKey) {
-            $colDef .= ' PRIMARY KEY';
-        }
-        if ($colMeta->autoIncrement) {
-            $colDef .= ' AUTO_INCREMENT';
-        }
-
-        return $colDef;
-    }
-
-    /**
-     * Añade una definición de FOREIGN KEY al array $constraints.
-     */
-    private function addForeignKeyConstraint(
-        array &$constraints,
+    private static function buildCreateTableSQL(
         string $tableName,
-        string $localCol,
-        string $refTable,
-        string $refCol,
-        bool $onDeleteCascade
-    ): void {
-        // Nombre arbitrario del constraint
-        $constraintName = "fk_{$tableName}_{$localCol}_{$refTable}_{$refCol}";
+        array $columns,
+        array $foreignKeys
+    ): string {
+        $columnsSQL = [];
 
-        $fkDef = "CONSTRAINT `$constraintName` FOREIGN KEY (`$localCol`) "
-            . "REFERENCES `$refTable`(`$refCol`)";
-        if ($onDeleteCascade) {
-            $fkDef .= " ON DELETE CASCADE";
+        // 1. Definir columnas
+        $primaryKeys = [];
+        foreach ($columns as $col) {
+            $typeSQL = strtoupper($col['type'] ?? 'VARCHAR');
+            $length = $col['length'] ? "({$col['length']})" : '';
+
+            $colDef = "`{$col['name']}` $typeSQL$length";
+
+            if (!$col['nullable']) {
+                $colDef .= " NOT NULL";
+            }
+            if ($col['autoIncrement']) {
+                $colDef .= " AUTO_INCREMENT";
+            }
+            $columnsSQL[] = $colDef;
+
+            if ($col['primaryKey']) {
+                $primaryKeys[] = $col['name'];
+            }
         }
-        $constraints[] = $fkDef;
+
+        // 2. Definir PRIMARY KEY
+        if (!empty($primaryKeys)) {
+            $pkList = array_map(fn($pk) => "`$pk`", $primaryKeys);
+            $columnsSQL[] = "PRIMARY KEY (" . implode(', ', $pkList) . ")";
+        }
+
+        // 3. Definir Foreign Keys
+        foreach ($foreignKeys as $fk) {
+            if (!$fk['referenceTable'] || !$fk['referenceColumn']) {
+                continue;
+            }
+            $columnsSQL[] = "FOREIGN KEY (`{$fk['columnName']}`)
+                             REFERENCES `{$fk['referenceTable']}`(`{$fk['referenceColumn']}`)";
+        }
+
+        // 4. Construir la sentencia final
+        return "CREATE TABLE IF NOT EXISTS `$tableName` (\n  "
+            . implode(",\n  ", $columnsSQL)
+            . "\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
     }
 
     /**
-     * Crea la tabla pivote para ManyToMany, si no existe.
-     * Ej: CREATE TABLE roles_users(
-     *        user_id INT,
-     *        role_id INT,
-     *        PRIMARY KEY(user_id, role_id),
-     *        FOREIGN KEY ...
-     *      )
+     * Deriva el nombre de la tabla a partir del nombre de la clase,
+     * en caso de que no se haya especificado en el atributo Entity.
      */
-    private function createPivotTable(string $modelClass, Many2Many $rel): void
+    private static function deriveTableName(string $className): string
     {
-        // Nombre de la tabla pivote
-        $pivotTable = $rel->pivot;
+        $parts = explode('\\', $className);
+        return strtolower(end($parts));
+    }
 
-        // La PK local (ej. 'id' en el modelo actual)
-        $localKey = $rel->localKey;
-        // La PK en la tabla destino
-        $relatedKey = $rel->relatedKey;
-
-        // Nombre de la tabla de la otra clase
-        $relatedTable = $rel->target::tableName();
-
-        // Nombre de la tabla actual
-        /** @var Model $modelClass */
-        $tableName = $modelClass::tableName();
-
-        // Columnas en la pivote: foreignPivotKey, relatedPivotKey
-        // Ej. user_id INT NOT NULL, role_id INT NOT NULL
-        $pivotCols = [];
-        $pivotCols[] = "`{$rel->foreignPivotKey}` INT NOT NULL";
-        $pivotCols[] = "`{$rel->relatedPivotKey}` INT NOT NULL";
-
-        // Primary key compuesta
-        $pivotPK = "PRIMARY KEY (`{$rel->foreignPivotKey}`, `{$rel->relatedPivotKey}`)";
-
-        // Foreign keys
-        $constraints = [];
-
-        // FK a la tabla actual
-        $constraints[] = "CONSTRAINT `fk_{$pivotTable}_{$rel->foreignPivotKey}_{$tableName}_{$localKey}` "
-            . "FOREIGN KEY (`{$rel->foreignPivotKey}`) "
-            . "REFERENCES `{$tableName}`(`{$localKey}`)"
-            . ($rel->onDeleteCascade ? " ON DELETE CASCADE" : "");
-
-        // FK a la tabla destino
-        $constraints[] = "CONSTRAINT `fk_{$pivotTable}_{$rel->relatedPivotKey}_{$relatedTable}_{$relatedKey}` "
-            . "FOREIGN KEY (`{$rel->relatedPivotKey}`) "
-            . "REFERENCES `{$relatedTable}`(`{$relatedKey}`)"
-            . ($rel->onDeleteCascade ? " ON DELETE CASCADE" : "");
-
-        // Construir la sentencia CREATE TABLE (simplificado)
-        $createSql = "CREATE TABLE IF NOT EXISTS `$pivotTable` (\n  "
-            . implode(",\n  ", array_merge($pivotCols, [$pivotPK], $constraints))
-            . "\n) ENGINE=InnoDB;";
-
-        $this->pdo->exec($createSql);
+    /**
+     * (Opcional) Para drop de tabla, etc.
+     * @throws Exception
+     */
+    public static function dropTable(string $tableName): bool
+    {
+        $conn = DBCore::getInstance()->getConnection();
+        try {
+            $conn->exec("DROP TABLE IF EXISTS `$tableName`");
+            return true;
+        } catch (PDOException $e) {
+            echo "Error al eliminar la tabla '$tableName': " . $e->getMessage();
+            return false;
+        }
     }
 }

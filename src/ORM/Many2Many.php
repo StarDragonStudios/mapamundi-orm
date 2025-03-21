@@ -4,24 +4,20 @@ namespace Sdstudios\MapamundiOrm\ORM;
 
 use Attribute;
 
-#[Attribute]
+#[Attribute(Attribute::TARGET_PROPERTY)]
 class Many2Many
 {
     /**
-     * @param string $target   Clase relacionada (ej. 'App\Models\Role')
-     * @param string $pivot    Nombre de la tabla pivote (ej. 'users_roles')
-     * @param string $foreignPivotKey  Columna en la tabla pivote que apunta a este modelo (ej. 'user_id')
-     * @param string $relatedPivotKey  Columna en la tabla pivote que apunta a la clase $target (ej. 'role_id')
-     * @param string $localKey         PK en la tabla actual (ej. 'id')
-     * @param string $relatedKey       PK en la tabla $target (ej. 'id')
+     * @param string      $targetEntity         Clase/entidad del lado opuesto
+     * @param string|null $joinTable            Tabla intermedia
+     * @param string|null $joinColumn           Columna local en la tabla intermedia
+     * @param string|null $inverseJoinColumn    Columna de la otra entidad en la tabla intermedia
      */
     public function __construct(
-        public string $target,
-        public string $pivot,
-        public string $foreignPivotKey,
-        public string $relatedPivotKey,
-        public string $localKey = 'id',
-        public string $relatedKey = 'id',
-        public bool $onDeleteCascade = false
-    ) {}
+        public string $targetEntity,
+        public ?string $joinTable = null,
+        public ?string $joinColumn = null,
+        public ?string $inverseJoinColumn = null
+    ) {
+    }
 }

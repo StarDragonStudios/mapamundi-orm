@@ -1,23 +1,52 @@
 <?php
 
 namespace Sdstudios\MapamundiOrm\Database;
-
+use Exception;
 use PDO;
+use PDOException;
 
 class DBCore
 {
-    private PDO $pdo;
-
-    public function __construct(DBConfig $config)
-    {
-        $dsn = "mysql:host={$config->host};dbname={$config->dbName};port={$config->port};charset=utf8";
-        $this->pdo = new PDO($dsn, $config->user, $config->password);
-        $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        $this->pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_CLASS);
+    private static ?DBCore $instance = null;
+    private PDO $connection {
+        get => $this->connection;
     }
 
-    public function getPdo(): PDO
+    private function __construct(DBConfig $config)
     {
-        return $this->pdo;
+        try {
+            $this->connection = new PDO(
+                $config->getDSN(),
+                $config->user,
+                $config->pass
+            );
+            $this->connection->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        } catch (PDOException $e) {
+            // Manejo simple del error, podrías mejorarlo
+            die("Error de conexión: " . $e->getMessage());
+        }
+    }
+
+    public static function init(DBConfig $config): void
+    {
+        if (self::$instance === null) {
+            self::$instance = new DBCore($config);
+        }
+    }
+
+    /**
+     * @throws Exception
+     */
+    public static function getInstance(): DBCore
+    {
+        if (self::$instance === null) {
+            throw new Exception("DBCore no ha sido inicializado. Llama a DBCore::init() primero.");
+        }
+        return self::$instance;
+    }
+
+    public function getConnection(): PDO
+    {
+        return $this->connection;
     }
 }
