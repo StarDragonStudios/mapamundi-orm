@@ -4,6 +4,7 @@ namespace Sdstudios\MapamundiOrm\ORM;
 
 use Exception;
 use PDOException;
+use ReflectionClass;
 use Sdstudios\MapamundiOrm\Database\DBCore;
 use PDO;
 
@@ -170,7 +171,21 @@ abstract class Model
 
     public static function getTableName(): string
     {
-        // Se puede inferir por convención
+        // Usamos ReflectionClass para inspeccionar la clase hija
+        $reflection = new ReflectionClass(static::class);
+
+        // Buscar si la clase tiene el atributo Entity
+        $entityAttrs = $reflection->getAttributes(Entity::class);
+        if (!empty($entityAttrs)) {
+            /** @var Entity $entityInstance */
+            $entityInstance = $entityAttrs[0]->newInstance();
+            if (!empty($entityInstance->tableName)) {
+                return $entityInstance->tableName;
+            }
+        }
+
+        // Si no está anotado con Entity o no define tableName,
+        // tomamos el nombre de la clase en minúsculas como fallback.
         $path = explode('\\', static::class);
         return strtolower(end($path));
     }
