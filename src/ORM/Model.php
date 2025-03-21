@@ -3,6 +3,7 @@
 namespace Sdstudios\MapamundiOrm\ORM;
 
 use Exception;
+use PDOException;
 use Sdstudios\MapamundiOrm\Database\DBCore;
 use PDO;
 
@@ -44,50 +45,59 @@ abstract class Model
         $table = static::getTableName();
         $pk = static::$primaryKey;
 
-        $columns = array_keys($this->attributes);
-        if ($this->isNewRecord) {
-            // INSERT
-            $placeholders = array_map(fn($col) => ":$col", $columns);
+        try {
+            $columns = array_keys($this->attributes);
+            if ($this->isNewRecord) {
+                // INSERT
+                $placeholders = array_map(fn($col) => ":$col", $columns);
 
-            $sql = "INSERT INTO `$table` (" . implode(', ', $columns) . ")
+                $sql = "INSERT INTO `$table` (" . implode(', ', $columns) . ")
                     VALUES (" . implode(', ', $placeholders) . ")";
-            $stmt = $conn->prepare($sql);
+                $stmt = $conn->prepare($sql);
 
-            foreach ($this->attributes as $col => $val) {
-                $stmt->bindValue(":$col", $val);
-            }
-
-            $result = $stmt->execute();
-            if ($result) {
-                $lastId = $conn->lastInsertId();
-                if ($lastId) {
-                    $this->attributes[$pk] = $lastId;
+                foreach ($this->attributes as $col => $val) {
+                    $stmt->bindValue(":$col", $val);
                 }
-                $this->isNewRecord = false;
-            }
 
-            return $result;
-        } else {
-            // UPDATE
-            $setClause = [];
+                $result = $stmt->execute();
+                if ($result) {
+                    $lastId = $conn->lastInsertId();
+                    if ($lastId) {
+                        $this->attributes[$pk] = $lastId;
+                    }
+                    $this->isNewRecord = false;
+                }
 
-            foreach ($columns as $col) {
-                if ($col === $pk) continue;
-                $setClause[] = "`$col` = :$col";
-            }
+                return $result;
+            } else {
+                // UPDATE
+                $setClause = [];
 
-            $sql = "UPDATE `$table` 
+                foreach ($columns as $col) {
+                    if ($col === $pk) continue;
+                    $setClause[] = "`$col` = :$col";
+                }
+
+                $sql = "UPDATE `$table` 
                     SET " . implode(', ', $setClause) . "
                     WHERE `$pk` = :pk_val";
-            $stmt = $conn->prepare($sql);
+                $stmt = $conn->prepare($sql);
 
-            foreach ($this->attributes as $col => $val) {
-                if ($col === $pk) continue;
-                $stmt->bindValue(":$col", $val);
+                foreach ($this->attributes as $col => $val) {
+                    if ($col === $pk) continue;
+                    $stmt->bindValue(":$col", $val);
+                }
+                $stmt->bindValue(':pk_val', $this->attributes[$pk]);
+
+                return $stmt->execute();
             }
-            $stmt->bindValue(':pk_val', $this->attributes[$pk]);
-
-            return $stmt->execute();
+        } catch (PDOException $pdo_e) {
+            if ($this->isTableNotFound($pdo_e)) {
+                SchemaManager::createTableFromEntity(static::class);
+                return $this->save();
+            } else {
+                throw $pdo_e;
+            }
         }
     }
 
@@ -163,5 +173,13 @@ abstract class Model
         // Se puede inferir por convención
         $path = explode('\\', static::class);
         return strtolower(end($path));
+    }
+
+    protected function isTableNotFound(PDOException $e): bool
+    {
+        $sqlState = $e->getCode();
+        return ($sqlState === '42S02')
+            || str_contains($e->getMessage(), 'doesn\'t exist')
+            || str_contains($e->getMessage(), 'no such table');
     }
 }
