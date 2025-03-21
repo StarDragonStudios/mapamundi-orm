@@ -4,18 +4,16 @@ namespace Sdstudios\MapamundiOrm\ORM;
 
 use Attribute;
 
-#[Attribute]
+#[Attribute(Attribute::TARGET_PROPERTY)]
 class One2Many
 {
     /**
-     * @param string $target Clase hija
-     * @param string $foreignKey Columna en la tabla hija que apunta a la PK del padre
-     * @param string $localKey Nombre de la columna PK en la tabla padre (ej. 'id')
+     * @param string $targetEntity  Clase/entidad del lado "muchos"
+     * @param string $mappedBy      El atributo en la entidad target que referencia a esta (inversa)
      */
     public function __construct(
-        public string $target,
-        public string $foreignKey,
-        public string $localKey = 'id',
-        public bool $onDeleteCascade = false
-    ) {}
+        public string $targetEntity,
+        public string $mappedBy
+    ) {
+    }
 }

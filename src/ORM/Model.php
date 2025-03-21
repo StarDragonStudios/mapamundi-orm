@@ -3,85 +3,117 @@
 namespace Sdstudios\MapamundiOrm\ORM;
 
 use Exception;
+use Sdstudios\MapamundiOrm\Database\DBCore;
 use PDO;
-use ReflectionClass;
-use ReflectionProperty;
-
 
 abstract class Model
 {
-    protected static PDO $pdo;
+    protected array $attributes = [];
+    protected bool $isNewRecord = true;
 
-    public static function setConnection(PDO $pdo): void
+    protected static string $primaryKey = 'id';
+
+    public function __construct(array $data = [])
     {
-        self::$pdo = $pdo;
+        $this->fill($data);
     }
 
-    public static function tableName(): string
+    public function fill(array $data): void
     {
-        $shortName = new ReflectionClass(static::class)->getShortName();
-        return strtolower($shortName) . 's';
-    }
-
-    public function save(): void
-    {
-        // Ejemplo mínimo de INSERT/UPDATE
-        $refClass = new ReflectionClass(static::class);
-        $props = $refClass->getProperties();
-
-        $columns = [];
-        $values = [];
-        $placeholders = [];
-        $pkName = null;
-        $pkValue = null;
-
-        foreach ($props as $prop) {
-            $attr = $prop->getAttributes(Column::class);
-            if (count($attr) > 0) {
-                /** @var Column $columnMeta */
-                $columnMeta = $attr[0]->newInstance();
-                $colName = $prop->getName();
-                $colValue = $this->$colName;
-
-                $columns[] = $colName;
-                $values[] = $colValue;
-                $placeholders[] = '?';
-
-                if ($columnMeta->primaryKey) {
-                    $pkName = $colName;
-                    $pkValue = $colValue;
-                }
-            }
+        foreach ($data as $key => $value) {
+            $this->set($key, $value);
         }
+    }
 
-        $table = static::tableName();
+    public function set(string $key, mixed $value): void
+    {
+        $this->attributes[$key] = $value;
+    }
 
-        if ($pkName && $pkValue) {
-            // UPDATE
-            $sets = [];
-            $updateValues = [];
-            foreach ($columns as $i => $col) {
-                if ($col !== $pkName) {
-                    $sets[] = "`$col` = ?";
-                    $updateValues[] = $values[$i];
-                }
-            }
-            $sql = "UPDATE `$table` SET " . implode(", ", $sets) . " WHERE `$pkName` = ?";
-            $stmt = self::$pdo->prepare($sql);
-            $updateValues[] = $pkValue;
-            $stmt->execute($updateValues);
-        } else {
+    public function get(string $key): mixed
+    {
+        return $this->attributes[$key] ?? null;
+    }
+
+    /**
+     * @throws Exception
+     */
+    public function save(): bool
+    {
+        $conn = DBCore::getInstance()->getConnection();
+        $table = static::getTableName();
+        $pk = static::$primaryKey;
+
+        $columns = array_keys($this->attributes);
+        if ($this->isNewRecord) {
             // INSERT
-            $colList = implode(', ', array_map(fn($c) => "`$c`", $columns));
-            $valList = implode(', ', $placeholders);
-            $sql = "INSERT INTO `$table` ($colList) VALUES ($valList)";
-            $stmt = self::$pdo->prepare($sql);
-            $stmt->execute($values);
+            $placeholders = array_map(fn($col) => ":$col", $columns);
 
-            if ($pkName) {
-                $this->$pkName = self::$pdo->lastInsertId();
+            $sql = "INSERT INTO `$table` (" . implode(', ', $columns) . ")
+                    VALUES (" . implode(', ', $placeholders) . ")";
+            $stmt = $conn->prepare($sql);
+
+            foreach ($this->attributes as $col => $val) {
+                $stmt->bindValue(":$col", $val);
             }
+
+            $result = $stmt->execute();
+            if ($result) {
+                $lastId = $conn->lastInsertId();
+                if ($lastId) {
+                    $this->attributes[$pk] = $lastId;
+                }
+                $this->isNewRecord = false;
+            }
+
+            return $result;
+        } else {
+            // UPDATE
+            $setClause = [];
+
+            foreach ($columns as $col) {
+                if ($col === $pk) continue;
+                $setClause[] = "`$col` = :$col";
+            }
+
+            $sql = "UPDATE `$table` 
+                    SET " . implode(', ', $setClause) . "
+                    WHERE `$pk` = :pk_val";
+            $stmt = $conn->prepare($sql);
+
+            foreach ($this->attributes as $col => $val) {
+                if ($col === $pk) continue;
+                $stmt->bindValue(":$col", $val);
+            }
+            $stmt->bindValue(':pk_val', $this->attributes[$pk]);
+
+            return $stmt->execute();
         }
+    }
+
+    /**
+     * @throws Exception
+     */
+    public function delete(): bool
+    {
+        $conn = DBCore::getInstance()->getConnection();
+        $table = static::getTableName();
+        $pk = static::$primaryKey;
+
+        if (!isset($this->attributes[$pk])) {
+            return false;
+        }
+
+        $sql = "DELETE FROM `$table` WHERE `$pk` = :pk";
+        $stmt = $conn->prepare($sql);
+        $stmt->bindValue(':pk', $this->attributes[$pk]);
+        $result = $stmt->execute();
+
+        if ($result) {
+            $this->isNewRecord = true;
+        }
+
+        return $result;
     }
 
     /**
@@ -89,210 +121,47 @@ abstract class Model
      */
     public static function find(int $id): ?static
     {
-        $table = static::tableName();
-        $pkName = static::getPrimaryKeyName();
-        if (!$pkName) throw new Exception("No primary key column found in " . static::class);
+        $conn = DBCore::getInstance()->getConnection();
+        $table = static::getTableName();
+        $pk = static::$primaryKey;
 
-        $sql = "SELECT * FROM `$table` WHERE `$pkName` = ?";
-        $stmt = self::$pdo->prepare($sql);
-        $stmt->execute([$id]);
-        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        $sql = "SELECT * FROM `$table` WHERE `$pk` = :id LIMIT 1";
+        $stmt = $conn->prepare($sql);
+        $stmt->bindValue(':id', $id);
+        $stmt->execute();
 
-        if (!$row) return null;
-
-        $instance = new static();
-        foreach ($row as $key => $val) {
-            if (property_exists($instance, $key)) {
-                $instance->$key = $val;
-            }
+        $data = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($data) {
+            $model = new static($data);
+            $model->isNewRecord = false;
+            return $model;
         }
-        return $instance;
-    }
 
-    protected static function getPrimaryKeyName(): ?string
-    {
-        $refClass = new ReflectionClass(static::class);
-        foreach ($refClass->getProperties() as $prop) {
-            $attr = $prop->getAttributes(Column::class);
-            if (count($attr) > 0) {
-                /** @var Column $columnMeta */
-                $columnMeta = $attr[0]->newInstance();
-                if ($columnMeta->primaryKey) {
-                    return $prop->getName();
-                }
-            }
-        }
         return null;
     }
 
-    public function loadRelations(): void
+    /**
+     * @throws Exception
+     */
+    public static function all(): array
     {
-        $refClass = new ReflectionClass($this);
-        $props = $refClass->getProperties();
+        $conn = DBCore::getInstance()->getConnection();
+        $table = static::getTableName();
+        $stmt = $conn->prepare("SELECT * FROM `$table`");
+        $stmt->execute();
 
-        foreach ($props as $prop) {
-            // Revisar si la propiedad tiene un atributo de relación
-            $relationAttrs = $prop->getAttributes(One2One::class)
-                ?: $prop->getAttributes(One2Many::class)
-                    ?: $prop->getAttributes(Many2One::class)
-                        ?: $prop->getAttributes(Many2Many::class);
-
-            if (count($relationAttrs) === 0) {
-                continue;
-            }
-
-            $relation = $relationAttrs[0]->newInstance(); // El primer attribute
-
-            match (true) {
-                $relation instanceof One2One => $this->loadOne2One($prop, $relation),
-                $relation instanceof Many2One => $this->loadMany2One($prop, $relation),
-                $relation instanceof One2Many => $this->loadOne2Many($prop, $relation),
-                $relation instanceof Many2Many => $this->loadMany2Many($prop, $relation),
-                default => null
-            };
-        }
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        return array_map(function ($row) {
+            $model = new static($row);
+            $model->isNewRecord = false;
+            return $model;
+        }, $rows);
     }
 
-    private function loadMany2One(ReflectionProperty $prop, Many2One $rel): void
+    public static function getTableName(): string
     {
-        $foreignKeyCol = $rel->foreignKey;
-        $ownerKey = $rel->ownerKey;
-        /** @var Model $targetClass */
-        $targetClass = $rel->target;
-
-        // El valor de la FK en *este* objeto
-        $fkValue = $this->$foreignKeyCol;
-        if (!$fkValue) {
-            $this->{$prop->getName()} = null;
-            return;
-        }
-
-        // Buscar en la tabla target: SELECT * FROM target WHERE ownerKey = $fkValue
-        $sql = "SELECT * FROM `{$targetClass::tableName()}` WHERE `$ownerKey` = ?";
-        $stmt = self::$pdo->prepare($sql);
-        $stmt->execute([$fkValue]);
-        $row = $stmt->fetch(\PDO::FETCH_ASSOC);
-
-        if ($row) {
-            $instance = new $targetClass();
-            foreach ($row as $col => $val) {
-                if (property_exists($instance, $col)) {
-                    $instance->$col = $val;
-                }
-            }
-            // Asignar la instancia a la propiedad
-            $this->{$prop->getName()} = $instance;
-        } else {
-            $this->{$prop->getName()} = null;
-        }
-    }
-
-    private function loadOne2Many(ReflectionProperty $prop, One2Many $rel): void
-    {
-        $localKeyValue = $this->{$rel->localKey};
-        if (!$localKeyValue) {
-            $this->{$prop->getName()} = [];
-            return;
-        }
-
-        /** @var Model $targetClass */
-        $targetClass = $rel->target;
-        $tableChild = $targetClass::tableName();
-
-        // SELECT * FROM child WHERE foreignKey = $localKeyValue
-        $sql = "SELECT * FROM `$tableChild` WHERE `{$rel->foreignKey}` = ?";
-        $stmt = self::$pdo->prepare($sql);
-        $stmt->execute([$localKeyValue]);
-        $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
-
-        $children = [];
-        foreach ($rows as $row) {
-            $childInstance = new $targetClass();
-            foreach ($row as $col => $val) {
-                if (property_exists($childInstance, $col)) {
-                    $childInstance->$col = $val;
-                }
-            }
-            $children[] = $childInstance;
-        }
-        $this->{$prop->getName()} = $children;
-    }
-
-    private function loadOne2One(ReflectionProperty $prop, One2One $rel): void
-    {
-        $localKeyValue = $this->{$rel->localKey};
-        if (!$localKeyValue) {
-            $this->{$prop->getName()} = null;
-            return;
-        }
-
-        /** @var Model $targetClass */
-        $targetClass = $rel->target;
-        $tableChild = $targetClass::tableName();
-
-        // SELECT * FROM child WHERE foreignKey = $localKeyValue LIMIT 1
-        $sql = "SELECT * FROM `$tableChild` WHERE `{$rel->foreignKey}` = ? LIMIT 1";
-        $stmt = self::$pdo->prepare($sql);
-        $stmt->execute([$localKeyValue]);
-        $row = $stmt->fetch(\PDO::FETCH_ASSOC);
-
-        if ($row) {
-            $childInstance = new $targetClass();
-            foreach ($row as $col => $val) {
-                if (property_exists($childInstance, $col)) {
-                    $childInstance->$col = $val;
-                }
-            }
-            $this->{$prop->getName()} = $childInstance;
-        } else {
-            $this->{$prop->getName()} = null;
-        }
-    }
-
-    private function loadMany2Many(ReflectionProperty $prop, Many2Many $rel)
-    {
-        $localKeyValue = $this->{$rel->localKey};
-        if (!$localKeyValue) {
-            $this->{$prop->getName()} = [];
-            return;
-        }
-
-        /** @var Model $targetClass */
-        $targetClass = $rel->target;
-        $targetTable = $targetClass::tableName();
-
-        // 1. Buscar en la tabla pivote todos los IDs de la entidad target
-        $sqlPivot = "SELECT `{$rel->relatedPivotKey}` as related_id
-                     FROM `{$rel->pivot}`
-                     WHERE `{$rel->foreignPivotKey}` = ?";
-        $stmtPivot = self::$pdo->prepare($sqlPivot);
-        $stmtPivot->execute([$localKeyValue]);
-        $pivotRows = $stmtPivot->fetchAll(\PDO::FETCH_COLUMN);
-
-        if (count($pivotRows) === 0) {
-            $this->{$prop->getName()} = [];
-            return;
-        }
-
-        // 2. Buscar en la tabla $targetTable esos IDs
-        $inPlaceholder = rtrim(str_repeat('?,', count($pivotRows)), ',');
-        $sqlTarget = "SELECT * FROM `$targetTable`
-                      WHERE `{$rel->relatedKey}` IN ($inPlaceholder)";
-        $stmtTarget = self::$pdo->prepare($sqlTarget);
-        $stmtTarget->execute($pivotRows);
-        $targetRows = $stmtTarget->fetchAll(\PDO::FETCH_ASSOC);
-
-        $relatedInstances = [];
-        foreach ($targetRows as $row) {
-            $instance = new $targetClass();
-            foreach ($row as $col => $val) {
-                if (property_exists($instance, $col)) {
-                    $instance->$col = $val;
-                }
-            }
-            $relatedInstances[] = $instance;
-        }
-
-        $this->{$prop->getName()} = $relatedInstances;
+        // Se puede inferir por convención
+        $path = explode('\\', static::class);
+        return strtolower(end($path));
     }
 }
