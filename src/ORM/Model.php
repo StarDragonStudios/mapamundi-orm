@@ -38,6 +38,10 @@ abstract class Model
     }
 
     /**
+     * Inserta/Actualiza el registro en la base de datos.
+     * Tras un INSERT exitoso, se llama a refresh() para emular
+     * el comportamiento de Hibernate que rellena valores por defecto.
+     *
      * @throws Exception
      */
     public function save(): bool
@@ -48,12 +52,13 @@ abstract class Model
 
         try {
             $columns = array_keys($this->attributes);
+
             if ($this->isNewRecord) {
                 // INSERT
                 $placeholders = array_map(fn($col) => ":$col", $columns);
 
                 $sql = "INSERT INTO `$table` (" . implode(', ', $columns) . ")
-                    VALUES (" . implode(', ', $placeholders) . ")";
+                        VALUES (" . implode(', ', $placeholders) . ")";
                 $stmt = $conn->prepare($sql);
 
                 foreach ($this->attributes as $col => $val) {
@@ -62,14 +67,21 @@ abstract class Model
 
                 $result = $stmt->execute();
                 if ($result) {
+                    // Obtener ID autogenerado (si lo hay)
                     $lastId = $conn->lastInsertId();
                     if ($lastId) {
                         $this->attributes[$pk] = $lastId;
                     }
+
+                    // Ya no es nuevo
                     $this->isNewRecord = false;
+
+                    // Refrescamos para obtener columnas generadas por la BD
+                    $this->refresh();
                 }
 
                 return $result;
+
             } else {
                 // UPDATE
                 $setClause = [];
@@ -79,9 +91,9 @@ abstract class Model
                     $setClause[] = "`$col` = :$col";
                 }
 
-                $sql = "UPDATE `$table` 
-                    SET " . implode(', ', $setClause) . "
-                    WHERE `$pk` = :pk_val";
+                $sql = "UPDATE `$table`
+                        SET " . implode(', ', $setClause) . "
+                        WHERE `$pk` = :pk_val";
                 $stmt = $conn->prepare($sql);
 
                 foreach ($this->attributes as $col => $val) {
@@ -92,8 +104,12 @@ abstract class Model
 
                 return $stmt->execute();
             }
+
         } catch (PDOException $pdo_e) {
-            if ($this->isTableNotFound($pdo_e)) {
+            static $alreadyTried = false;
+            // Si la tabla no existe, intentamos crearla y reintentar
+            if ($this->isTableNotFound($pdo_e) && !$alreadyTried) {
+                $alreadyTried = true;
                 SchemaManager::createTableFromEntity(static::class);
                 return $this->save();
             } else {
@@ -103,6 +119,8 @@ abstract class Model
     }
 
     /**
+     * Borra el registro de la base de datos.
+     *
      * @throws Exception
      */
     public function delete(): bool
@@ -128,6 +146,8 @@ abstract class Model
     }
 
     /**
+     * Devuelve el registro con el PK = $id, o null si no existe.
+     *
      * @throws Exception
      */
     public static function find(int $id): ?static
@@ -152,12 +172,15 @@ abstract class Model
     }
 
     /**
+     * Retorna todos los registros de la tabla.
+     *
      * @throws Exception
      */
     public static function all(): array
     {
         $conn = DBCore::getInstance()->getConnection();
         $table = static::getTableName();
+
         $stmt = $conn->prepare("SELECT * FROM `$table`");
         $stmt->execute();
 
@@ -169,12 +192,14 @@ abstract class Model
         }, $rows);
     }
 
+    /**
+     * Determina el nombre de la tabla usando el atributo #[Entity]
+     * o, si no existe, usa el nombre de la clase en minúsculas.
+     */
     public static function getTableName(): string
     {
-        // Usamos ReflectionClass para inspeccionar la clase hija
         $reflection = new ReflectionClass(static::class);
 
-        // Buscar si la clase tiene el atributo Entity
         $entityAttrs = $reflection->getAttributes(Entity::class);
         if (!empty($entityAttrs)) {
             /** @var Entity $entityInstance */
@@ -184,17 +209,47 @@ abstract class Model
             }
         }
 
-        // Si no está anotado con Entity o no define tableName,
-        // tomamos el nombre de la clase en minúsculas como fallback.
         $path = explode('\\', static::class);
         return strtolower(end($path));
     }
 
+    /**
+     * Comprueba si el error de PDO indica que la tabla no existe.
+     */
     protected function isTableNotFound(PDOException $e): bool
     {
         $sqlState = $e->getCode();
         return ($sqlState === '42S02')
             || str_contains($e->getMessage(), 'doesn\'t exist')
             || str_contains($e->getMessage(), 'no such table');
+    }
+
+    /**
+     * "Refresca" los atributos de este objeto haciendo un SELECT
+     * de la fila actual con base en su primary key. Útil para cargar
+     * valores por defecto o generados tras un insert.
+     *
+     * @throws Exception
+     */
+    public function refresh(): void
+    {
+        $pk = static::$primaryKey;
+        if (!isset($this->attributes[$pk])) {
+            // No podemos refrescar si no hay PK
+            return;
+        }
+
+        $conn = DBCore::getInstance()->getConnection();
+        $table = static::getTableName();
+
+        $sql = "SELECT * FROM `$table` WHERE `$pk` = :id LIMIT 1";
+        $stmt = $conn->prepare($sql);
+        $stmt->bindValue(':id', $this->attributes[$pk]);
+        $stmt->execute();
+
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($row) {
+            $this->fill($row);
+        }
     }
 }
