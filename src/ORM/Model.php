@@ -24,16 +24,6 @@ abstract class Model
         $this->refresh();
     }
 
-    public function set(string $key, mixed $value): void
-    {
-        $this->attributes[$key] = $value;
-    }
-
-    public function get(string $key): mixed
-    {
-        return $this->attributes[$key] ?? null;
-    }
-
     /**
      * Inserta/Actualiza el registro en la base de datos.
      * Tras un INSERT exitoso, se llama a refresh() para emular
@@ -48,7 +38,7 @@ abstract class Model
         $pk = static::$primaryKey;
 
         try {
-            $columns = array_keys($this->attributes);
+            $columns = new ReflectionClass($this);
 
             if ($this->isNewRecord) {
                 // INSERT
