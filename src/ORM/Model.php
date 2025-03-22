@@ -15,16 +15,13 @@ abstract class Model
 
     protected static string $primaryKey = 'id';
 
-    public function __construct(array $data = [])
+    /**
+     * @throws Exception
+     */
+    public function __construct()
     {
-        $this->fill($data);
-    }
-
-    public function fill(array $data): void
-    {
-        foreach ($data as $key => $value) {
-            $this->set($key, $value);
-        }
+        $this->save();
+        $this->refresh();
     }
 
     public function set(string $key, mixed $value): void
